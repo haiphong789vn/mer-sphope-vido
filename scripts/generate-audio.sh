@@ -91,7 +91,52 @@ use_edge_tts() {
     fi
 }
 
-# Function to use Zalo TTS as fallback
+# Function to use Google Translate TTS (gTTS) as fallback
+use_gtts_fallback() {
+    echo ""
+    echo "=========================================="
+    echo "🔄 Using Google Translate TTS (gTTS) fallback"
+    echo "=========================================="
+
+    # Check if gTTS is installed
+    if ! command -v gtts-cli &> /dev/null; then
+        echo "Installing gTTS..."
+        pip install -q gTTS
+    fi
+
+    echo "Generating audio with gTTS (Vietnamese)..."
+    
+    # Save text to temp file
+    TEMP_TEXT_FILE="output/temp_text_for_tts.txt"
+    echo "$TEXT_CONTENT" > "$TEMP_TEXT_FILE"
+
+    # Generate audio using gTTS CLI
+    # -l vi: Vietnamese language
+    gtts-cli -f "$TEMP_TEXT_FILE" -l vi --output output/voiceover.mp3 2>&1
+
+    EXIT_CODE=$?
+    rm -f "$TEMP_TEXT_FILE"
+
+    if [ $EXIT_CODE -eq 0 ] && [ -f "output/voiceover.mp3" ]; then
+        echo "Converting mp3 to wav..."
+        ffmpeg -i output/voiceover.mp3 -y output/voiceover.wav 2>&1 | tail -5
+        
+        if [ -f "output/voiceover.wav" ]; then
+            rm -f output/voiceover.mp3
+            echo "✅ gTTS audio generated successfully: output/voiceover.wav"
+            ls -lh output/voiceover.wav
+            return 0
+        else
+            echo "❌ Failed to convert gTTS audio to wav"
+            return 1
+        fi
+    else
+        echo "❌ gTTS failed (exit code: $EXIT_CODE)"
+        return 1
+    fi
+}
+
+# Function to use Zalo TTS as last resort
 use_zalo_tts_fallback() {
     echo ""
     echo "=========================================="
@@ -159,16 +204,25 @@ if use_edge_tts; then
     exit 0
 fi
 
-# If Edge-TTS fails, try Zalo TTS as fallback
+# If Edge-TTS fails, try gTTS as fallback
 echo ""
-echo "⚠️ Edge-TTS failed, trying Zalo TTS fallback..."
-if use_zalo_tts_fallback; then
+echo "⚠️ Edge-TTS failed, trying gTTS fallback..."
+if use_gtts_fallback; then
     echo ""
-    echo "✅ Audio generation completed with Zalo TTS (Fallback)"
+    echo "✅ Audio generation completed with gTTS (Fallback)"
     exit 0
 fi
 
-# Both failed
+# If gTTS fails, try Zalo TTS as last resort
 echo ""
-echo "❌ Failed to generate audio with both Edge-TTS and Zalo TTS"
+echo "⚠️ gTTS failed, trying Zalo TTS fallback..."
+if use_zalo_tts_fallback; then
+    echo ""
+    echo "✅ Audio generation completed with Zalo TTS (Last Resort)"
+    exit 0
+fi
+
+# All failed
+echo ""
+echo "❌ Failed to generate audio with Edge-TTS, gTTS, and Zalo TTS"
 exit 1
