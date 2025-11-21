@@ -1,0 +1,430 @@
+name: Merge Product Review Videos
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_data:
+        description: 'JSON data containing video information'
+        required: false
+        type: string
+  push:
+    paths:
+      - 'video-input.json'
+
+jobs:
+  merge-videos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq bc curl python3-pip
+
+          # Upgrade edge-tts to latest version to fix 401 authentication error
+          pip3 install --upgrade edge-tts
+
+      - name: Setup working directory
+        run: |
+          mkdir -p videos
+          mkdir -p output
+          mkdir -p scripts
+          chmod +x scripts/*.sh 2>/dev/null || true
+
+      - name: Prepare video data
+        id: prepare
+        run: |
+          if [ -n "${{ github.event.inputs.video_data }}" ]; then
+            echo '${{ github.event.inputs.video_data }}' > video-data.json
+          elif [ -f "video-input.json" ]; then
+            cp video-input.json video-data.json
+          else
+            echo "No video data provided"
+            exit 1
+          fi
+
+          # Extract product name
+          PRODUCT_NAME=$(jq -r '.productInfo.name' video-data.json)
+          echo "product_name=$PRODUCT_NAME" >> $GITHUB_OUTPUT
+
+          # Count videos
+          VIDEO_COUNT=$(jq -r '.videos | length' video-data.json)
+          echo "video_count=$VIDEO_COUNT" >> $GITHUB_OUTPUT
+
+          echo "Product: $PRODUCT_NAME"
+          echo "Total videos: $VIDEO_COUNT"
+
+      - name: Download videos
+        run: |
+          VIDEO_COUNT=$(jq -r '.videos | length' video-data.json)
+
+          for i in $(seq 0 $((VIDEO_COUNT - 1))); do
+            URL=$(jq -r ".videos[$i].url" video-data.json)
+            echo "Downloading video $((i + 1))/$VIDEO_COUNT from $URL"
+
+            # Download with retry
+            MAX_RETRIES=3
+            RETRY_COUNT=0
+
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if curl -L -o "videos/video_$i.mp4" "$URL" --max-time 300 --connect-timeout 30; then
+                echo "Successfully downloaded video $((i + 1))"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                  echo "Download failed, retrying... ($RETRY_COUNT/$MAX_RETRIES)"
+                  sleep 5
+                else
+                  echo "Failed to download video $((i + 1)) after $MAX_RETRIES attempts"
+                  exit 1
+                fi
+              fi
+            done
+          done
+
+          echo "All videos downloaded successfully"
+          ls -lh videos/
+
+      - name: Process videos (trim 2s from start and end)
+        run: |
+          VIDEO_COUNT=$(jq -r '.videos | length' video-data.json)
+
+          for i in $(seq 0 $((VIDEO_COUNT - 1))); do
+            INPUT="videos/video_$i.mp4"
+            OUTPUT="videos/trimmed_$i.mp4"
+
+            echo "=== Processing video $((i + 1))/$VIDEO_COUNT ==="
+
+            # Check input video specs
+            echo "Input specs:"
+            ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,codec_name,width,height -of default=noprint_wrappers=1 "$INPUT" || echo "No video stream"
+            ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,codec_name -of default=noprint_wrappers=1 "$INPUT" || echo "No audio stream"
+
+            # Get video duration
+            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT")
+
+            # Calculate new duration (original - 4 seconds)
+            NEW_DURATION=$(echo "$DURATION - 4" | bc)
+
+            # Check if video is longer than 4 seconds
+            if (( $(echo "$NEW_DURATION > 0" | bc -l) )); then
+              # Trim 2s from start and 2s from end with consistent encoding
+              ffmpeg -i "$INPUT" -ss 2 -t "$NEW_DURATION" \
+                -c:v libx264 -preset medium -crf 23 \
+                -c:a aac -b:a 128k -ar 48000 \
+                -r 30 \
+                -y "$OUTPUT"
+              echo "Trimmed video $((i + 1)): ${DURATION}s -> ${NEW_DURATION}s"
+            else
+              echo "Video $((i + 1)) is too short (${DURATION}s), keeping original"
+              cp "$INPUT" "$OUTPUT"
+            fi
+
+            echo "Output specs:"
+            ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,codec_name -of default=noprint_wrappers=1 "$OUTPUT"
+            echo ""
+          done
+
+          echo "All videos processed"
+          ls -lh videos/trimmed_*.mp4
+
+      - name: Create concat file
+        run: |
+          VIDEO_COUNT=$(jq -r '.videos | length' video-data.json)
+
+          # Create concat list for ffmpeg
+          for i in $(seq 0 $((VIDEO_COUNT - 1))); do
+            echo "file 'trimmed_$i.mp4'" >> videos/concat_list.txt
+          done
+
+          cat videos/concat_list.txt
+
+      - name: Merge videos with re-encode (fix audio sync issues)
+        run: |
+          cd videos
+          echo "Merging videos with consistent encoding..."
+
+          # Re-encode to ensure all videos have same specs and fix audio sync
+          ffmpeg -f concat -safe 0 -i concat_list.txt \
+            -c:v libx264 -preset medium -crf 23 \
+            -c:a aac -b:a 128k -ar 48000 \
+            -r 30 \
+            -movflags +faststart \
+            -y ../output/merged_temp.mp4
+
+          echo "Videos merged successfully with re-encoding"
+
+          # Check output specs
+          echo "=== Merged Video Specs ==="
+          ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,codec_name,width,height -of default=noprint_wrappers=1 ../output/merged_temp.mp4
+          ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels,codec_name -of default=noprint_wrappers=1 ../output/merged_temp.mp4
+
+      - name: Generate product script with AI
+        env:
+          HUGGINGFACE_ENDPOINT: "https://router.huggingface.co/v1/chat/completions"
+          HUGGINGFACE_MODEL: "deepseek-ai/DeepSeek-V3.2-Exp"
+          HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
+        run: |
+          bash scripts/generate-script.sh video-data.json
+
+      - name: Generate audio with TTS (Edge-TTS primary, Zalo fallback)
+        env:
+          ZALO_API_KEY: ${{ secrets.ZALO_API_KEY }}
+        run: |
+          # Try Edge-TTS first (free, unlimited), fallback to Zalo if needed
+          bash scripts/generate-audio.sh scripts/generated_script.txt
+
+          # Check if audio was generated
+          if [ ! -f "output/voiceover.wav" ]; then
+            echo "❌ Failed to generate audio with both Edge-TTS and Zalo TTS"
+            exit 1
+          fi
+
+          echo "✅ Audio generated successfully"
+
+      - name: Normalize and add audio to video
+        run: |
+          # Get video and audio durations
+          VIDEO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 output/merged_temp.mp4)
+          AUDIO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 output/voiceover.wav)
+
+          echo "Video duration: ${VIDEO_DURATION}s"
+          echo "Audio duration: ${AUDIO_DURATION}s"
+
+          # Check audio specs before normalization
+          echo "=== Original Audio Specs ==="
+          ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels,codec_name -of default=noprint_wrappers=1 output/voiceover.wav
+
+          # Normalize audio to consistent format (48kHz, stereo, AAC)
+          echo "Normalizing audio..."
+          ffmpeg -i output/voiceover.wav \
+            -ar 48000 -ac 2 -c:a aac -b:a 192k \
+            -y output/voiceover_normalized.aac
+
+          # Check normalized audio specs
+          echo "=== Normalized Audio Specs ==="
+          ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels,codec_name -of default=noprint_wrappers=1 output/voiceover_normalized.aac
+
+          # Replace original audio with normalized AI voiceover
+          # Re-encode video to prevent sync issues
+          echo "Adding audio to video with re-encoding..."
+          ffmpeg -i output/merged_temp.mp4 -i output/voiceover_normalized.aac \
+            -map 0:v -map 1:a \
+            -c:v libx264 -preset medium -crf 23 \
+            -c:a copy \
+            -shortest \
+            -y output/merged_with_audio.mp4
+
+          echo "AI voiceover added to video successfully (original audio removed)"
+          ls -lh output/merged_with_audio.mp4
+
+      - name: Add text overlay at top with smart line wrapping
+        run: |
+          PRODUCT_NAME="${{ steps.prepare.outputs.product_name }}"
+
+          # Get video dimensions
+          VIDEO_INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 output/merged_with_audio.mp4)
+          WIDTH=$(echo $VIDEO_INFO | cut -d'x' -f1)
+          HEIGHT=$(echo $VIDEO_INFO | cut -d'x' -f2)
+
+          echo "Video dimensions: ${WIDTH}x${HEIGHT}"
+          echo "Product name: $PRODUCT_NAME"
+          NAME_LENGTH=${#PRODUCT_NAME}
+          echo "Product name length: $NAME_LENGTH"
+
+          # Calculate text position
+          TEXT_Y=60
+
+          # Smart text wrapping - split long text into multiple lines
+          if [ $NAME_LENGTH -gt 70 ]; then
+            echo "Text is long, splitting into multiple lines..."
+
+            # For very long text (>105 chars), split into 3 lines
+            if [ $NAME_LENGTH -gt 105 ]; then
+              LINE_LENGTH=$((NAME_LENGTH / 3))
+              echo "Splitting into 3 lines (approx $LINE_LENGTH chars each)"
+
+              # Find split points near 1/3 and 2/3
+              SPLIT1=$((LINE_LENGTH))
+              SPLIT2=$((LINE_LENGTH * 2))
+
+              # Find nearest space to split points
+              for offset in $(seq 0 20); do
+                # Check forward
+                pos1=$((SPLIT1 + offset))
+                if [ $pos1 -lt $NAME_LENGTH ]; then
+                  char="${PRODUCT_NAME:$pos1:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    SPLIT1=$pos1
+                    break
+                  fi
+                fi
+                # Check backward
+                pos1=$((SPLIT1 - offset))
+                if [ $pos1 -gt 0 ]; then
+                  char="${PRODUCT_NAME:$pos1:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    SPLIT1=$pos1
+                    break
+                  fi
+                fi
+              done
+
+              # Find second split point
+              for offset in $(seq 0 20); do
+                pos2=$((SPLIT2 + offset))
+                if [ $pos2 -lt $NAME_LENGTH ]; then
+                  char="${PRODUCT_NAME:$pos2:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    SPLIT2=$pos2
+                    break
+                  fi
+                fi
+                pos2=$((SPLIT2 - offset))
+                if [ $pos2 -gt $SPLIT1 ]; then
+                  char="${PRODUCT_NAME:$pos2:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    SPLIT2=$pos2
+                    break
+                  fi
+                fi
+              done
+
+              LINE1="${PRODUCT_NAME:0:$SPLIT1}"
+              LINE2="${PRODUCT_NAME:$SPLIT1:$((SPLIT2 - SPLIT1))}"
+              LINE3="${PRODUCT_NAME:$SPLIT2}"
+
+              # Trim spaces
+              LINE1=$(echo "$LINE1" | xargs)
+              LINE2=$(echo "$LINE2" | xargs)
+              LINE3=$(echo "$LINE3" | xargs)
+
+              DISPLAY_TEXT="$LINE1\n$LINE2\n$LINE3"
+              FONTSIZE=24
+
+            else
+              # Split into 2 lines for 70-105 chars
+              MIDDLE=$((NAME_LENGTH / 2))
+              echo "Splitting into 2 lines (middle at $MIDDLE)"
+
+              # Find nearest space to middle
+              BEST_SPLIT=$MIDDLE
+              for offset in $(seq 0 20); do
+                # Check forward
+                pos=$((MIDDLE + offset))
+                if [ $pos -lt $NAME_LENGTH ]; then
+                  char="${PRODUCT_NAME:$pos:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    BEST_SPLIT=$pos
+                    break
+                  fi
+                fi
+                # Check backward
+                pos=$((MIDDLE - offset))
+                if [ $pos -gt 0 ]; then
+                  char="${PRODUCT_NAME:$pos:1}"
+                  if [ "$char" = " " ] || [ "$char" = "," ] || [ "$char" = "-" ]; then
+                    BEST_SPLIT=$pos
+                    break
+                  fi
+                fi
+              done
+
+              LINE1="${PRODUCT_NAME:0:$BEST_SPLIT}"
+              LINE2="${PRODUCT_NAME:$BEST_SPLIT}"
+
+              # Trim spaces
+              LINE1=$(echo "$LINE1" | xargs)
+              LINE2=$(echo "$LINE2" | xargs)
+
+              DISPLAY_TEXT="$LINE1\n$LINE2"
+              FONTSIZE=28
+            fi
+
+            echo "Split result:"
+            echo "  Line 1: $LINE1"
+            [ -n "$LINE2" ] && echo "  Line 2: $LINE2"
+            [ -n "$LINE3" ] && echo "  Line 3: $LINE3"
+
+          else
+            # Single line for short text
+            DISPLAY_TEXT="$PRODUCT_NAME"
+            if [ $NAME_LENGTH -gt 50 ]; then
+              FONTSIZE=32
+            else
+              FONTSIZE=38
+            fi
+            echo "Using single line"
+          fi
+
+          echo "Using fontsize: $FONTSIZE"
+
+          # Escape special characters for ffmpeg
+          ESCAPED_TEXT=$(echo -e "$DISPLAY_TEXT" | sed "s/'/'\\\\''/g" | sed 's/:/\\:/g')
+
+          # Add text overlay with line wrapping (no text_w parameter)
+          # Use \n for line breaks, drawtext will handle multiple lines
+          ffmpeg -i output/merged_with_audio.mp4 \
+            -vf "drawtext=text='$ESCAPED_TEXT':fontsize=$FONTSIZE:fontcolor=white:x=(w-text_w)/2:y=$TEXT_Y:box=1:boxcolor=black@0.85:boxborderw=25:line_spacing=12" \
+            -c:a copy \
+            -y output/final_merged_video.mp4
+
+          if [ $? -eq 0 ]; then
+            echo "✅ Text overlay added successfully at top center with multi-line wrapping"
+          else
+            echo "❌ Failed to add text overlay"
+            exit 1
+          fi
+
+          ls -lh output/final_merged_video.mp4
+
+      - name: Get video info
+        run: |
+          echo "=== Final Video Information ==="
+          ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 output/final_merged_video.mp4
+
+          FILE_SIZE=$(du -h output/final_merged_video.mp4 | cut -f1)
+          echo "File size: $FILE_SIZE"
+
+      - name: Upload merged video
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-product-video
+          path: output/final_merged_video.mp4
+          retention-days: 30
+
+      - name: Upload generated script and audio
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-content
+          path: |
+            scripts/generated_script.txt
+            output/voiceover.wav
+          retention-days: 30
+
+      - name: Create download instructions
+        run: |
+          echo "## ✅ Video Merge Complete with AI Voiceover!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Product: ${{ steps.prepare.outputs.product_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total videos merged:** ${{ steps.prepare.outputs.video_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎬 Features Added:" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AI-generated product description (DeepSeek AI)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎤 Vietnamese voiceover (Zalo TTS)" >> $GITHUB_STEP_SUMMARY
+          echo "- 📝 Smart text overlay with auto-sizing" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download Instructions:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to the **Actions** tab" >> $GITHUB_STEP_SUMMARY
+          echo "2. Click on this workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "3. Scroll down to **Artifacts**" >> $GITHUB_STEP_SUMMARY
+          echo "4. Download:" >> $GITHUB_STEP_SUMMARY
+          echo "   - **merged-product-video** - Final video with audio and text" >> $GITHUB_STEP_SUMMARY
+          echo "   - **generated-content** - AI script and audio file" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All artifacts will be available for 30 days." >> $GITHUB_STEP_SUMMARY
