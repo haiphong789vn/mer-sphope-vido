@@ -4,6 +4,13 @@
 
 set -e
 
+# Check for required tools
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq command not found. Please install jq first."
+    echo "Install with: apt-get install jq (Ubuntu/Debian) or brew install jq (macOS)"
+    exit 1
+fi
+
 if [ -z "$1" ]; then
     echo "Usage: $0 <video-data.json>"
     exit 1
