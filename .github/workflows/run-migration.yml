@@ -1,0 +1,146 @@
+name: Run Database Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "migrate" to confirm running migration'
+        required: true
+        default: ''
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "migrate" ]; then
+            echo "❌ Migration cancelled - confirmation required"
+            echo "Please type 'migrate' in the confirmation field to run the migration"
+            exit 1
+          fi
+          echo "✅ Confirmation received, proceeding with migration..."
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          pip3 install --upgrade pip
+          pip3 install psycopg2-binary
+
+      - name: Check database connection
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Testing database connection..."
+          python3 -c "
+          import os
+          import psycopg2
+          try:
+              conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+              print('✅ Database connection successful')
+              conn.close()
+          except Exception as e:
+              print(f'❌ Database connection failed: {e}')
+              exit(1)
+          "
+
+      - name: Run migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "=========================================="
+          echo "Running database migration..."
+          echo "=========================================="
+          python3 run_migration.py
+
+      - name: Verify migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "Verifying migration results..."
+          echo "=========================================="
+          python3 -c "
+          import os
+          import psycopg2
+          from psycopg2.extras import RealDictCursor
+
+          conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+          cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+          # Check columns exist
+          cursor.execute('''
+              SELECT column_name, data_type, is_nullable
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                  AND table_name = 'products'
+                  AND column_name IN ('r2_video_url', 'processed_at')
+              ORDER BY column_name;
+          ''')
+
+          columns = cursor.fetchall()
+
+          if len(columns) == 2:
+              print('✅ Migration verified successfully!')
+              print('\nColumns added:')
+              for col in columns:
+                  print(f\"  - {col['column_name']}: {col['data_type']} (nullable: {col['is_nullable']})\")
+          else:
+              print('❌ Migration verification failed - columns not found')
+              exit(1)
+
+          # Check index exists
+          cursor.execute('''
+              SELECT indexname
+              FROM pg_indexes
+              WHERE schemaname = 'public'
+                  AND tablename = 'products'
+                  AND indexname = 'idx_products_processed_at';
+          ''')
+
+          index = cursor.fetchone()
+          if index:
+              print(f\"\n✅ Index '{index['indexname']}' created successfully\")
+          else:
+              print('\n⚠️  Warning: Index not found (may already exist or creation failed)')
+
+          cursor.close()
+          conn.close()
+          "
+
+      - name: Create summary
+        if: always()
+        run: |
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "## ✅ Database Migration Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The following columns have been added to the \`public.products\` table:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Column Name | Data Type | Description |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------------|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
+            echo "| \`r2_video_url\` | TEXT | URL of the uploaded video on Cloudflare R2 |" >> $GITHUB_STEP_SUMMARY
+            echo "| \`processed_at\` | TIMESTAMP | Timestamp when the video was processed |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Migration complete - database schema is up to date" >> $GITHUB_STEP_SUMMARY
+            echo "- 🎬 You can now run the **Process Videos from Database to R2** workflow" >> $GITHUB_STEP_SUMMARY
+            echo "- 📊 The \`r2_video_url\` and \`processed_at\` columns will be populated during video processing" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Migration Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Common issues:" >> $GITHUB_STEP_SUMMARY
+            echo "- Database connection failed - check \`DATABASE_URL\` secret" >> $GITHUB_STEP_SUMMARY
+            echo "- Insufficient permissions - ensure database user has ALTER TABLE privileges" >> $GITHUB_STEP_SUMMARY
+          fi
