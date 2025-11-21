@@ -331,13 +331,18 @@ class VideoProcessor:
 
             script_path = self.scripts_dir / 'generate-script.sh'
 
-            subprocess.run([
+            result = subprocess.run([
                 'bash', str(script_path), str(video_data_file)
-            ], check=True, env=env, capture_output=True)
+            ], check=True, env=env, capture_output=True, text=True)
 
             logger.info("AI script generated successfully")
             return True
 
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error generating script: {e}")
+            logger.error(f"Script stdout: {e.stdout}")
+            logger.error(f"Script stderr: {e.stderr}")
+            return False
         except Exception as e:
             logger.error(f"Error generating script: {e}")
             return False
