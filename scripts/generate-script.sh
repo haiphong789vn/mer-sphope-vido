@@ -43,11 +43,37 @@ fi
 echo "Video duration: ${VIDEO_DURATION}s"
 echo "Calculated word count: $WORD_COUNT words (at 132 words/minute)"
 
-# Validate environment variables
-if [ -z "$HUGGINGFACE_API_KEY" ]; then
-    echo "Error: HUGGINGFACE_API_KEY environment variable is required"
+# Validate environment variables and select API key randomly
+# Collect all available API keys
+AVAILABLE_KEYS=()
+
+if [ ! -z "$HUGGINGFACE_API_KEY" ]; then
+    AVAILABLE_KEYS+=("$HUGGINGFACE_API_KEY")
+fi
+
+if [ ! -z "$HUGGINGFACE_API_KEY2" ]; then
+    AVAILABLE_KEYS+=("$HUGGINGFACE_API_KEY2")
+fi
+
+if [ ! -z "$HUGGINGFACE_API_KEY3" ]; then
+    AVAILABLE_KEYS+=("$HUGGINGFACE_API_KEY3")
+fi
+
+# Check if we have at least one key
+if [ ${#AVAILABLE_KEYS[@]} -eq 0 ]; then
+    echo "Error: No HUGGINGFACE_API_KEY found. Please set at least one of:"
+    echo "  - HUGGINGFACE_API_KEY"
+    echo "  - HUGGINGFACE_API_KEY2"
+    echo "  - HUGGINGFACE_API_KEY3"
     exit 1
 fi
+
+# Randomly select one key from available keys
+KEY_COUNT=${#AVAILABLE_KEYS[@]}
+RANDOM_INDEX=$((RANDOM % KEY_COUNT))
+SELECTED_API_KEY="${AVAILABLE_KEYS[$RANDOM_INDEX]}"
+
+echo "Found $KEY_COUNT API key(s), randomly selected key #$((RANDOM_INDEX + 1))"
 
 if [ -z "$HUGGINGFACE_ENDPOINT" ]; then
     echo "Warning: HUGGINGFACE_ENDPOINT not set, using default"
@@ -120,7 +146,7 @@ QUAN TRỌNG: Chỉ trả về JSON, không thêm text nào khác."
 echo ""
 echo "Calling HuggingFace API..."
 RESPONSE=$(curl -s --max-time 60 --location "$HUGGINGFACE_ENDPOINT" \
-  --header "Authorization: Bearer $HUGGINGFACE_API_KEY" \
+  --header "Authorization: Bearer $SELECTED_API_KEY" \
   --header "Content-Type: application/json" \
   --data "{
     \"model\": \"$HUGGINGFACE_MODEL\",
