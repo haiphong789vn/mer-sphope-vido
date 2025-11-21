@@ -91,6 +91,7 @@ class VideoProcessor:
                 SELECT id, video_data
                 FROM public.products
                 WHERE merge_status = FALSE
+                AND video_data IS NOT NULL
                 ORDER BY id
             """
 
@@ -433,6 +434,8 @@ class VideoProcessor:
             env['HUGGINGFACE_ENDPOINT'] = self.huggingface_endpoint
             env['HUGGINGFACE_MODEL'] = self.huggingface_model
             env['HUGGINGFACE_API_KEY'] = self.huggingface_api_key
+            # Pass Gemini key for fallback
+            env['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY', '')
 
             script_path = self.scripts_dir / 'generate-script.sh'
 
