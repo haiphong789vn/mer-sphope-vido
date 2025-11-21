@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Video Processing Script with Database Integration and R2 Upload
-Processes product videos from PostgreSQL database, merges them, and uploads to Cloudflare R2
+Video Processing Script
+Database-driven video processing with cloud storage integration
 """
 
 import os
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class VideoProcessor:
-    """Main class for processing videos from database to R2"""
+    """Main video processing class"""
 
     def __init__(self):
         """Initialize with environment variables"""
@@ -192,8 +192,12 @@ class VideoProcessor:
             if not self.add_text_overlay(product_name):
                 return None
 
+            # Upscale to 1080p
+            if not self.upscale_to_1080p():
+                return None
+
             # Upload to R2
-            final_video = self.output_dir / 'final_merged_video.mp4'
+            final_video = self.output_dir / 'final_merged_video_1080p.mp4'
             r2_url = self.upload_to_r2(final_video, product_id, video_data)
 
             return r2_url
@@ -480,6 +484,48 @@ class VideoProcessor:
         result_lines.append(text[current_pos:].strip())
 
         return '\\n'.join(result_lines)
+
+    def upscale_to_1080p(self) -> bool:
+        """Upscale video to 1080p resolution (1920x1080)"""
+        try:
+            logger.info("Upscaling video to 1080p...")
+
+            input_video = self.output_dir / 'final_merged_video.mp4'
+            output_video = self.output_dir / 'final_merged_video_1080p.mp4'
+
+            # Get current video dimensions
+            result = subprocess.run([
+                'ffprobe', '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height',
+                '-of', 'csv=s=x:p=0',
+                str(input_video)
+            ], capture_output=True, text=True, check=True)
+
+            current_dimensions = result.stdout.strip()
+            logger.info(f"Current dimensions: {current_dimensions}")
+
+            # Upscale to 1080p with high quality settings
+            # Using lanczos for best quality upscaling
+            # Maintain aspect ratio with padding if needed
+            subprocess.run([
+                'ffmpeg',
+                '-i', str(input_video),
+                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+                '-c:v', 'libx264',
+                '-preset', 'slow',
+                '-crf', '18',
+                '-c:a', 'copy',
+                '-movflags', '+faststart',
+                '-y', str(output_video)
+            ], check=True, capture_output=True)
+
+            logger.info(f"Video upscaled to 1080p: {current_dimensions} -> 1920x1080")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error upscaling video: {e}")
+            return False
 
     def upload_to_r2(self, video_path: Path, product_id: int, video_data: Dict) -> Optional[str]:
         """Upload video to Cloudflare R2"""
