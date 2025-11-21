@@ -68,13 +68,6 @@ if [ ${#AVAILABLE_KEYS[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Randomly select one key from available keys
-KEY_COUNT=${#AVAILABLE_KEYS[@]}
-RANDOM_INDEX=$((RANDOM % KEY_COUNT))
-SELECTED_API_KEY="${AVAILABLE_KEYS[$RANDOM_INDEX]}"
-
-echo "Found $KEY_COUNT API key(s), randomly selected key #$((RANDOM_INDEX + 1))"
-
 if [ -z "$HUGGINGFACE_ENDPOINT" ]; then
     echo "Warning: HUGGINGFACE_ENDPOINT not set, using default"
     HUGGINGFACE_ENDPOINT="https://router.huggingface.co/v1/chat/completions"
@@ -142,54 +135,164 @@ Trả về ĐÚNG định dạng JSON:
 
 QUAN TRỌNG: Chỉ trả về JSON, không thêm text nào khác."
 
-# Call HuggingFace API
+# Call HuggingFace API with retry and key rotation
 echo ""
-echo "Calling HuggingFace API..."
-RESPONSE=$(curl -s --max-time 60 --location "$HUGGINGFACE_ENDPOINT" \
-  --header "Authorization: Bearer $SELECTED_API_KEY" \
-  --header "Content-Type: application/json" \
-  --data "{
-    \"model\": \"$HUGGINGFACE_MODEL\",
-    \"messages\": [
-      {
-        \"role\": \"user\",
-        \"content\": $(echo "$PROMPT" | jq -Rs .)
-      }
-    ],
-    \"max_tokens\": 1000,
-    \"temperature\": 0.7
-  }")
+echo "Calling HuggingFace API with key rotation support..."
 
-# Check if request was successful
-CURL_EXIT_CODE=$?
-if [ $CURL_EXIT_CODE -ne 0 ]; then
-    echo "Error: curl command failed with exit code $CURL_EXIT_CODE"
-    exit 1
+# Track failed keys
+FAILED_KEYS=()
+SUCCESS=false
+GENERATED_TEXT=""
+
+# Try all available keys until one succeeds
+while [ ${#AVAILABLE_KEYS[@]} -gt 0 ] && [ "$SUCCESS" = false ]; do
+    # Select random key from remaining keys
+    KEY_COUNT=${#AVAILABLE_KEYS[@]}
+    RANDOM_INDEX=$((RANDOM % KEY_COUNT))
+    CURRENT_API_KEY="${AVAILABLE_KEYS[$RANDOM_INDEX]}"
+    
+    # Show masked key for logging (first 10 chars)
+    MASKED_KEY="${CURRENT_API_KEY:0:10}..."
+    echo "Trying API key: $MASKED_KEY (${#AVAILABLE_KEYS[@]} key(s) remaining)"
+    
+    # Make API call
+    RESPONSE=$(curl -s --max-time 60 --location "$HUGGINGFACE_ENDPOINT" \
+      --header "Authorization: Bearer $CURRENT_API_KEY" \
+      --header "Content-Type: application/json" \
+      --data "{
+        \"model\": \"$HUGGINGFACE_MODEL\",
+        \"messages\": [
+          {
+            \"role\": \"user\",
+            \"content\": $(echo "$PROMPT" | jq -Rs .)
+          }
+        ],
+        \"max_tokens\": 1000,
+        \"temperature\": 0.7
+      }")
+    
+    # Check curl exit code
+    CURL_EXIT_CODE=$?
+    if [ $CURL_EXIT_CODE -ne 0 ]; then
+        echo "Warning: curl failed with exit code $CURL_EXIT_CODE, trying next key..."
+        FAILED_KEYS+=("$CURRENT_API_KEY")
+        # Remove failed key from available keys
+        unset AVAILABLE_KEYS[$RANDOM_INDEX]
+        AVAILABLE_KEYS=("${AVAILABLE_KEYS[@]}")  # Re-index array
+        continue
+    fi
+    
+    # Check if response is empty
+    if [ -z "$RESPONSE" ]; then
+        echo "Warning: Empty response, trying next key..."
+        FAILED_KEYS+=("$CURRENT_API_KEY")
+        unset AVAILABLE_KEYS[$RANDOM_INDEX]
+        AVAILABLE_KEYS=("${AVAILABLE_KEYS[@]}")
+        continue
+    fi
+    
+    # Log first 500 chars of response for debugging
+    echo "API Response (first 500 chars): ${RESPONSE:0:500}"
+    
+    # Check for API errors in response
+    API_ERROR=$(echo "$RESPONSE" | jq -r '.error // empty' 2>/dev/null)
+    if [ ! -z "$API_ERROR" ]; then
+        # Check if it's a quota/rate limit error
+        if echo "$API_ERROR" | grep -qi "exceeded\|quota\|rate limit\|limit reached"; then
+            echo "⚠️  Quota/Rate limit error: $API_ERROR"
+            echo "Switching to next available key..."
+            FAILED_KEYS+=("$CURRENT_API_KEY")
+            unset AVAILABLE_KEYS[$RANDOM_INDEX]
+            AVAILABLE_KEYS=("${AVAILABLE_KEYS[@]}")
+            continue
+        else
+            # Other API error - fail immediately
+            echo "Error: API returned error: $API_ERROR"
+            echo "Full response: $RESPONSE"
+            exit 1
+        fi
+    fi
+    
+    # Extract the generated text
+    GENERATED_TEXT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    
+    if [ -z "$GENERATED_TEXT" ] || [ "$GENERATED_TEXT" = "null" ]; then
+        echo "Warning: No text generated, trying next key..."
+        FAILED_KEYS+=("$CURRENT_API_KEY")
+        unset AVAILABLE_KEYS[$RANDOM_INDEX]
+        AVAILABLE_KEYS=("${AVAILABLE_KEYS[@]}")
+        continue
+    fi
+    
+    # Success!
+    SUCCESS=true
+    echo "✅ Successfully generated content with key: $MASKED_KEY"
+done
+
+# Fallback to Gemini if HuggingFace failed
+if [ "$SUCCESS" = false ] && [ ! -z "$GEMINI_API_KEY" ]; then
+    echo ""
+    echo "⚠️ All HuggingFace keys failed or exhausted."
+    echo "🔄 Falling back to Gemini API (gemini-1.5-flash)..."
+    
+    # Escape quotes in prompt for JSON
+    # We need to be careful with JSON escaping for Gemini's "text" field
+    # Using jq to handle escaping safely
+    ESCAPED_PROMPT=$(echo "$PROMPT" | jq -Rs .)
+    
+    # Remove enclosing quotes from jq output as we'll put them in the json structure
+    # Actually jq -Rs . outputs "string\n", so we use it directly as the value
+    
+    GEMINI_RESPONSE=$(curl -s --max-time 60 --location "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_API_KEY" \
+      --header 'Content-Type: application/json' \
+      --data "{
+        \"contents\": [
+          {
+            \"parts\": [
+              {
+                \"text\": $ESCAPED_PROMPT
+              }
+            ]
+          }
+        ]
+      }")
+      
+    # Check curl exit code
+    if [ $? -ne 0 ]; then
+        echo "Error: Gemini curl command failed"
+    else
+        # Check for errors
+        GEMINI_ERROR=$(echo "$GEMINI_RESPONSE" | jq -r '.error.message // empty' 2>/dev/null)
+        if [ ! -z "$GEMINI_ERROR" ]; then
+            echo "Error: Gemini API returned error: $GEMINI_ERROR"
+        else
+            # Extract text
+            GEMINI_TEXT=$(echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null)
+            
+            if [ ! -z "$GEMINI_TEXT" ] && [ "$GEMINI_TEXT" != "null" ]; then
+                GENERATED_TEXT="$GEMINI_TEXT"
+                SUCCESS=true
+                echo "✅ Successfully generated content using Gemini API"
+                
+                # Clean up markdown code blocks if present (Gemini likes to wrap JSON in ```json ... ```)
+                GENERATED_TEXT=$(echo "$GENERATED_TEXT" | sed 's/^```json//g' | sed 's/^```//g' | sed 's/```$//g')
+            else
+                echo "Error: Failed to extract text from Gemini response"
+                echo "Response: ${GEMINI_RESPONSE:0:500}..."
+            fi
+        fi
+    fi
 fi
 
-# Check if response is empty
-if [ -z "$RESPONSE" ]; then
-    echo "Error: Empty response from HuggingFace API"
-    exit 1
-fi
-
-# Log first 500 chars of response for debugging
-echo "API Response (first 500 chars): ${RESPONSE:0:500}"
-
-# Check for API errors in response
-API_ERROR=$(echo "$RESPONSE" | jq -r '.error // empty' 2>/dev/null)
-if [ ! -z "$API_ERROR" ]; then
-    echo "Error: API returned error: $API_ERROR"
-    echo "Full response: $RESPONSE"
-    exit 1
-fi
-
-# Extract the generated text
-GENERATED_TEXT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-
-if [ -z "$GENERATED_TEXT" ] || [ "$GENERATED_TEXT" = "null" ]; then
-    echo "Error: No text generated from API"
-    echo "Full API Response: $RESPONSE"
+# Check if we succeeded
+if [ "$SUCCESS" = false ]; then
+    echo ""
+    echo "❌ Error: All API keys failed or exhausted"
+    echo "Failed keys: ${#FAILED_KEYS[@]}"
+    echo "Please check:"
+    echo "  1. API key validity"
+    echo "  2. Quota remaining"
+    echo "  3. Network connectivity"
     exit 1
 fi
 
