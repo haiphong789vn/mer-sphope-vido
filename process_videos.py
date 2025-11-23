@@ -92,6 +92,7 @@ class VideoProcessor:
                 FROM public.products
                 WHERE merge_status = FALSE
                 AND video_data IS NOT NULL
+                AND video_data::text != 'null'
                 ORDER BY id
             """
 
@@ -649,13 +650,13 @@ class VideoProcessor:
             current_dimensions = result.stdout.strip()
             logger.info(f"Current dimensions: {current_dimensions}")
 
-            # Upscale to 1080p with high quality settings
+            # Upscale to 1080p (Vertical/Shorts) with high quality settings
             # Using lanczos for best quality upscaling
             # Maintain aspect ratio with padding if needed
             subprocess.run([
                 'ffmpeg',
                 '-i', str(input_video),
-                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+                '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
                 '-c:v', 'libx264',
                 '-preset', 'slow',
                 '-crf', '18',
