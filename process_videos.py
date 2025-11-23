@@ -51,6 +51,7 @@ class VideoProcessor:
         self.huggingface_model = os.getenv('HUGGINGFACE_MODEL', 'deepseek-ai/DeepSeek-V3.2-Exp')
         self.huggingface_api_key = os.getenv('HUGGINGFACE_API_KEY')
         self.zalo_api_key = os.getenv('ZALO_API_KEY')
+        self.elevenlabs_api_key = os.getenv('ELEVENLABS_API_KEY')
 
         # Working directories
         self.base_dir = Path(__file__).parent
@@ -467,6 +468,8 @@ class VideoProcessor:
             env = os.environ.copy()
             if self.zalo_api_key:
                 env['ZALO_API_KEY'] = self.zalo_api_key
+            if self.elevenlabs_api_key:
+                env['ELEVENLABS_API_KEY'] = self.elevenlabs_api_key
 
             script_path = self.scripts_dir / 'generate-audio.sh'
             text_file = self.scripts_dir / 'generated_script.txt'
@@ -527,8 +530,8 @@ class VideoProcessor:
             width = 1080
             
             # Smart text wrapping
-            # For 1080p width, ~30 characters per line is good for large readable text
-            max_chars_per_line = 30
+            # For 1080p width, ~20 characters per line is safer to avoid cut-off
+            max_chars_per_line = 20
             name_length = len(product_name)
             num_lines = max(1, (name_length + max_chars_per_line - 1) // max_chars_per_line)
             num_lines = min(num_lines, 4) # Cap at 4 lines
@@ -539,11 +542,11 @@ class VideoProcessor:
                 display_text = product_name
             
             # Fixed font size for 1080p
-            # Adjust slightly if many lines
+            # Reduced to ensure fit within width with padding
             if num_lines <= 2:
-                fontsize = 60
+                fontsize = 45
             else:
-                fontsize = 50
+                fontsize = 35
             
             logger.info(f"Text wrapping: {num_lines} lines, font size: {fontsize}")
 
