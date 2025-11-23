@@ -197,19 +197,106 @@ use_zalo_tts_fallback() {
     fi
 }
 
-# Try Edge-TTS first (Primary)
-if use_edge_tts; then
+# Function to use ElevenLabs TTS (Primary)
+use_elevenlabs_tts() {
     echo ""
-    echo "✅ Audio generation completed with Edge-TTS (Primary)"
+    echo "=========================================="
+    echo "🗣️ Using ElevenLabs TTS - Primary"
+    echo "=========================================="
+
+    if [ -z "$ELEVENLABS_API_KEY" ]; then
+        echo "⚠️ ELEVENLABS_API_KEY not set, skipping ElevenLabs TTS"
+        return 1
+    fi
+
+    # Voice ID: Rachel (American, but works for multilingual) or a specific Vietnamese one if found
+    # Using a popular pre-made voice that supports multilingual v2
+    # Rachel: 21m00Tcm4TlvDq8ikWAM
+    # Charlie: IKne3meq5aSn9XLyUdCD
+    # Multilingual v2 model supports Vietnamese
+    VOICE_ID="21m00Tcm4TlvDq8ikWAM" 
+    MODEL_ID="eleven_multilingual_v2"
+
+    echo "Generating audio with ElevenLabs (Model: $MODEL_ID)..."
+    
+    # API Endpoint
+    URL="https://api.elevenlabs.io/v1/text-to-speech/$VOICE_ID"
+
+    # Create JSON payload using jq to safely handle special characters and newlines
+    JSON_PAYLOAD=$(jq -n \
+                  --arg text "$TEXT_CONTENT" \
+                  --arg model "$MODEL_ID" \
+                  '{
+                    text: $text,
+                    model_id: $model,
+                    voice_settings: {
+                      stability: 0.5,
+                      similarity_boost: 0.75
+                    }
+                  }')
+
+    # Make API request
+    # Note: Using --fail to catch 401/400 errors
+    RESPONSE_CODE=$(curl -s -o output/voiceover.mp3 -w "%{http_code}" \
+        --request POST \
+        --url "$URL" \
+        --header "xi-api-key: $ELEVENLABS_API_KEY" \
+        --header "Content-Type: application/json" \
+        --data "$JSON_PAYLOAD")
+
+    if [ "$RESPONSE_CODE" -eq 200 ] && [ -f "output/voiceover.mp3" ]; then
+        # Check file size
+        FILE_SIZE=$(stat -f%z "output/voiceover.mp3" 2>/dev/null || stat -c%s "output/voiceover.mp3" 2>/dev/null || echo "0")
+        
+        if [ "$FILE_SIZE" -lt 1000 ]; then
+            echo "❌ ElevenLabs generated empty/small file ($FILE_SIZE bytes)"
+            return 1
+        fi
+
+        echo "Converting mp3 to wav..."
+        ffmpeg -i output/voiceover.mp3 -y output/voiceover.wav 2>&1 | tail -5
+        
+        if [ -f "output/voiceover.wav" ]; then
+            rm -f output/voiceover.mp3
+            echo "✅ ElevenLabs audio generated successfully: output/voiceover.wav"
+            return 0
+        else
+            echo "❌ Failed to convert ElevenLabs audio to wav"
+            return 1
+        fi
+    else
+        echo "❌ ElevenLabs API failed with status code: $RESPONSE_CODE"
+        # If response body exists, print it for debugging (it might be in output/voiceover.mp3 if curl saved it)
+        if [ -f "output/voiceover.mp3" ]; then
+            cat output/voiceover.mp3
+            rm output/voiceover.mp3
+        fi
+        return 1
+    fi
+}
+
+# Try ElevenLabs first (Primary)
+if use_elevenlabs_tts; then
+    echo ""
+    echo "✅ Audio generation completed with ElevenLabs (Primary)"
     exit 0
 fi
 
-# If Edge-TTS fails, try gTTS as fallback
+# If ElevenLabs fails, try Edge-TTS (Secondary)
+echo ""
+echo "⚠️ ElevenLabs failed, trying Edge-TTS fallback..."
+if use_edge_tts; then
+    echo ""
+    echo "✅ Audio generation completed with Edge-TTS (Secondary)"
+    exit 0
+fi
+
+# If Edge-TTS fails, try gTTS (Tertiary)
 echo ""
 echo "⚠️ Edge-TTS failed, trying gTTS fallback..."
 if use_gtts_fallback; then
     echo ""
-    echo "✅ Audio generation completed with gTTS (Fallback)"
+    echo "✅ Audio generation completed with gTTS (Tertiary)"
     exit 0
 fi
 
@@ -224,5 +311,5 @@ fi
 
 # All failed
 echo ""
-echo "❌ Failed to generate audio with Edge-TTS, gTTS, and Zalo TTS"
+echo "❌ Failed to generate audio with any TTS service"
 exit 1
