@@ -209,6 +209,33 @@ use_elevenlabs_tts() {
         return 1
     fi
 
+    # Parse API Key (Handle JSON array of keys)
+    # Input format: [{"name": "key1"}, {"name2": "key2"}]
+    # We need to extract just the key values
+    
+    # Check if input looks like JSON (starts with [)
+    if [[ "$ELEVENLABS_API_KEY" == \[* ]]; then
+        echo "Detected multiple API keys, selecting one randomly..."
+        
+        # Extract all values from the array of objects
+        # .[] iterates array, .[] iterates object values
+        SELECTED_KEY=$(echo "$ELEVENLABS_API_KEY" | jq -r '.[] | .[]' | shuf -n 1)
+        
+        if [ -n "$SELECTED_KEY" ]; then
+            # Mask key for logging (show last 4 chars)
+            MASKED_KEY="...${SELECTED_KEY: -4}"
+            echo "🔑 Selected API Key ending in $MASKED_KEY"
+            API_KEY_TO_USE="$SELECTED_KEY"
+        else
+            echo "❌ Failed to parse API keys from JSON"
+            return 1
+        fi
+    else
+        # Single key provided directly
+        API_KEY_TO_USE="$ELEVENLABS_API_KEY"
+        echo "🔑 Using provided single API Key"
+    fi
+
     # Voice IDs requested by user
     # Bradford: NNl6r8mD7vthiJatiJt1
     # Juniper: aMSt68OGf4xUZAnLpTU8
@@ -248,7 +275,7 @@ use_elevenlabs_tts() {
     RESPONSE_CODE=$(curl -s -o output/voiceover.mp3 -w "%{http_code}" \
         --request POST \
         --url "$URL" \
-        --header "xi-api-key: $ELEVENLABS_API_KEY" \
+        --header "xi-api-key: $API_KEY_TO_USE" \
         --header "Content-Type: application/json" \
         --data "$JSON_PAYLOAD")
 
