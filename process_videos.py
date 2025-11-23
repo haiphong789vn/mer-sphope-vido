@@ -609,7 +609,7 @@ class VideoProcessor:
         # Add remaining text as last line
         result_lines.append(text[current_pos:].strip())
 
-        return '\\n'.join(result_lines)
+        return '\n'.join(result_lines)
 
     def upscale_to_1080p(self, input_path: Path, output_path: Path) -> bool:
         """Upscale video to 1080p resolution (1080x1920)"""
