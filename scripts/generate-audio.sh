@@ -209,15 +209,23 @@ use_elevenlabs_tts() {
         return 1
     fi
 
-    # Voice ID: Rachel (American, but works for multilingual) or a specific Vietnamese one if found
-    # Using a popular pre-made voice that supports multilingual v2
-    # Rachel: 21m00Tcm4TlvDq8ikWAM
-    # Charlie: IKne3meq5aSn9XLyUdCD
-    # Multilingual v2 model supports Vietnamese
-    VOICE_ID="21m00Tcm4TlvDq8ikWAM" 
-    MODEL_ID="eleven_multilingual_v2"
+    # Voice IDs requested by user
+    # Bradford: NNl6r8mD7vthiJatiJt1
+    # Juniper: aMSt68OGf4xUZAnLpTU8
+    
+    # Randomly select one of the two voices
+    if [ $((RANDOM % 2)) -eq 0 ]; then
+        VOICE_ID="NNl6r8mD7vthiJatiJt1" # Bradford
+        VOICE_NAME="Bradford"
+    else
+        VOICE_ID="aMSt68OGf4xUZAnLpTU8" # Juniper
+        VOICE_NAME="Juniper"
+    fi
 
-    echo "Generating audio with ElevenLabs (Model: $MODEL_ID)..."
+    # Use the latest V3 model as requested
+    MODEL_ID="eleven_v3"
+
+    echo "Generating audio with ElevenLabs (Voice: $VOICE_NAME, Model: $MODEL_ID)..."
     
     # API Endpoint
     URL="https://api.elevenlabs.io/v1/text-to-speech/$VOICE_ID"
