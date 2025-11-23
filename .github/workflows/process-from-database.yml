@@ -52,6 +52,7 @@ jobs:
           HUGGINGFACE_MODEL: ${{ secrets.HUGGINGFACE_MODEL || 'deepseek-ai/DeepSeek-V3.2-Exp' }}
           HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
           ZALO_API_KEY: ${{ secrets.ZALO_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
         run: |
           python3 process_videos.py
 
