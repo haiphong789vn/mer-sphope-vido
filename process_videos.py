@@ -530,8 +530,8 @@ class VideoProcessor:
             width = 1080
             
             # Smart text wrapping
-            # For 1080p width, ~20 characters per line is safer to avoid cut-off
-            max_chars_per_line = 20
+            # For 1080p width, ~30 characters per line is good with the smaller font size
+            max_chars_per_line = 30
             name_length = len(product_name)
             num_lines = max(1, (name_length + max_chars_per_line - 1) // max_chars_per_line)
             num_lines = min(num_lines, 4) # Cap at 4 lines
